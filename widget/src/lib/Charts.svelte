@@ -9,6 +9,7 @@
     { label: "1h", s: 3600 },
     { label: "6h", s: 6 * 3600 },
     { label: "24h", s: 24 * 3600 },
+    { label: "3d", s: 72 * 3600 },
   ];
   let range = $state(3600);
 

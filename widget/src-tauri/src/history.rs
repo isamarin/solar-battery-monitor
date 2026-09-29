@@ -1,4 +1,4 @@
-//! Rolling 24h history of BMS samples, persisted as JSON lines in the app data dir.
+//! Rolling 72h history of BMS samples, persisted as JSON lines in the app data dir.
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -6,7 +6,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-const KEEP_MS: u64 = 24 * 3600 * 1000;
+const KEEP_MS: u64 = 72 * 3600 * 1000;
 const EVERY_MS: u64 = 5000;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -18,6 +18,15 @@ pub struct Sample {
     pub i: f64,
     pub cells: Vec<f64>,
     pub temps: Vec<f64>,
+    /// MOSFET bits (1 = charge, 2 = discharge); absent in samples recorded before it was added
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fet: Option<u8>,
+    /// protection bitmask (see protocol::PROTECTION_FLAGS)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prot: Option<u16>,
+    /// balancing bitmask, bit n = cell n+1
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bal: Option<u32>,
 }
 
 #[derive(Default)]
@@ -27,7 +36,7 @@ pub struct History {
 }
 
 impl History {
-    /// Loads the last 24h from `file` and compacts it.
+    /// Loads the last 72h from `file` and compacts it.
     pub fn load(file: PathBuf, now: u64) -> Self {
         let samples: VecDeque<Sample> = fs::read_to_string(&file)
             .unwrap_or_default()
@@ -70,7 +79,7 @@ mod tests {
     use super::*;
 
     fn at(t: u64) -> Sample {
-        Sample { t, soc: 50, v: 13.2, i: 1.0, cells: vec![3.3; 4], temps: vec![25.0] }
+        Sample { t, soc: 50, v: 13.2, i: 1.0, cells: vec![3.3; 4], temps: vec![25.0], fet: Some(3), prot: Some(0), bal: Some(0) }
     }
 
     #[test]
@@ -81,6 +90,12 @@ mod tests {
         assert!(h.push(at(5000)));
         assert!(h.push(at(KEEP_MS + 5000)));
         assert_eq!(h.all().iter().map(|s| s.t).collect::<Vec<_>>(), [5000, KEEP_MS + 5000]);
+    }
+
+    #[test]
+    fn reads_samples_without_state_fields() {
+        let s: Sample = serde_json::from_str(r#"{"t":1,"soc":0,"v":12.2,"i":2.7,"cells":[3.07],"temps":[25.8]}"#).unwrap();
+        assert_eq!((s.fet, s.prot, s.bal), (None, None, None));
     }
 
     #[test]

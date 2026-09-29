@@ -5,11 +5,12 @@
   import { onMount } from "svelte";
   import { CELL_MAX, CELL_MIN, type Sample, type Snapshot } from "$lib/bms";
   import Charts from "$lib/Charts.svelte";
+  import Recovery from "$lib/Recovery.svelte";
 
   let snap = $state<Snapshot>({ status: "", error: null, device: null, model: null, basic: null, cells: [], updated_at: 0 });
   let now = $state(Date.now());
   let pinned = $state(true);
-  let tab = $state<"now" | "charts">("now");
+  let tab = $state<"now" | "charts" | "recovery">("now");
   let samples = $state<Sample[]>([]);
 
   onMount(() => {
@@ -17,14 +18,24 @@
     invoke<Sample[]>("history").then((h) => (samples = h));
     const unlisten = listen<Snapshot>("bms", (e) => (snap = e.payload));
     const unlistenSample = listen<Sample>("sample", (e) => {
-      const cutoff = Date.now() - 24 * 3600 * 1000;
+      const cutoff = Date.now() - 72 * 3600 * 1000;
       samples = [...samples.filter((s) => s.t >= cutoff), e.payload];
     });
     const tick = setInterval(() => (now = Date.now()), 1000);
+    // ⌘1 / ⌘2 / ⌘3 switch tabs
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.metaKey ? ({ "1": "now", "2": "charts", "3": "recovery" } as const)[e.key as "1" | "2" | "3"] : undefined;
+      if (t) {
+        tab = t;
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onKey);
     return () => {
       unlisten.then((f) => f());
       unlistenSample.then((f) => f());
       clearInterval(tick);
+      window.removeEventListener("keydown", onKey);
     };
   });
 
@@ -67,12 +78,15 @@
   </header>
 
   <div class="tabs" role="tablist">
-    <button role="tab" aria-selected={tab === "now"} class:on={tab === "now"} onclick={() => (tab = "now")}>Now</button>
-    <button role="tab" aria-selected={tab === "charts"} class:on={tab === "charts"} onclick={() => (tab = "charts")}>Charts</button>
+    <button role="tab" aria-selected={tab === "now"} class:on={tab === "now"} onclick={() => (tab = "now")} title="⌘1">Now</button>
+    <button role="tab" aria-selected={tab === "charts"} class:on={tab === "charts"} onclick={() => (tab = "charts")} title="⌘2">Charts</button>
+    <button role="tab" aria-selected={tab === "recovery"} class:on={tab === "recovery"} onclick={() => (tab = "recovery")} title="⌘3">Recovery</button>
   </div>
 
   {#if tab === "charts"}
     <Charts {samples} />
+  {:else if tab === "recovery"}
+    <Recovery {samples} basic={snap.basic} {now} />
   {:else if !b}
     <section class="empty">
       <div class="spinner" class:off={snap.status === "error"}></div>
@@ -211,7 +225,7 @@
   .pin.on { color: var(--blue); }
   .pin:hover { background: var(--track); }
 
-  .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 2px; border-radius: 8px; background: var(--track); }
+  .tabs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px; padding: 2px; border-radius: 8px; background: var(--track); }
   .tabs button { border: 0; background: none; color: var(--muted); font: 600 12px -apple-system, sans-serif; padding: 4px 0; border-radius: 6px; }
   .tabs button.on { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
 

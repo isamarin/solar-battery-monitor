@@ -17,6 +17,23 @@ export interface Basic {
   temps: number[];
 }
 
+// Same order as protocol::PROTECTION_FLAGS on the Rust side.
+export const PROTECTION_FLAGS = [
+  "Cell overvoltage",
+  "Cell undervoltage",
+  "Pack overvoltage",
+  "Pack undervoltage",
+  "Charge overtemp",
+  "Charge undertemp",
+  "Discharge overtemp",
+  "Discharge undertemp",
+  "Charge overcurrent",
+  "Discharge overcurrent",
+  "Short circuit",
+  "AFE error",
+  "MOS software lock",
+];
+
 export interface Snapshot {
   status: "scanning" | "connecting" | "connected" | "error" | "";
   error: string | null;
@@ -31,7 +48,7 @@ export interface Snapshot {
 export const CELL_MIN = 2.5;
 export const CELL_MAX = 3.65;
 
-// Mirrors history::Sample (one point every 5 s, last 24 h).
+// Mirrors history::Sample (one point every 5 s, last 72 h).
 export interface Sample {
   t: number; // unix ms
   soc: number;
@@ -39,4 +56,8 @@ export interface Sample {
   i: number;
   cells: number[];
   temps: number[];
+  // absent in samples recorded before these fields existed
+  fet?: number; // 1 = charge, 2 = discharge
+  prot?: number;
+  bal?: number;
 }

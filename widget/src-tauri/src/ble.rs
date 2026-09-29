@@ -150,6 +150,9 @@ async fn poll(app: &AppHandle, shared: &Shared, history: &SharedHistory, p: &Per
             i: basic.current,
             cells: cells.clone(),
             temps: basic.temps.clone(),
+            fet: Some(basic.charge_fet as u8 | (basic.discharge_fet as u8) << 1),
+            prot: Some(basic.protection),
+            bal: Some(basic.balancing),
         };
         if history.lock().unwrap().push(sample.clone()) {
             let _ = app.emit("sample", sample);
