@@ -51,7 +51,7 @@
         cursor: { sync: { key: "bms" }, points: { size: 7, width: 2, fill: css("--card") }, drag: { x: false, y: false } },
         scales: { x: { time: true }, y: yRange ? { range: yRange } : { range: (_u, lo, hi) => pad(lo, hi) } },
         axes: [
-          { ...axis, space: 60 },
+          { ...axis, space: 60, values: (_u, vals) => vals.map((v) => new Date(v * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) },
           { ...axis, size: 34, values: (_u, vals) => vals.map((v) => +v.toFixed(decimals > 1 ? 2 : decimals)) },
         ],
         series: [
