@@ -7,6 +7,7 @@ use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::{FutureExt, Stream, StreamExt};
 use serde::Serialize;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -20,6 +21,11 @@ const POLL: Duration = Duration::from_secs(2);
 const REPLY_TIMEOUT: Duration = Duration::from_millis(1500);
 /// the first request after connecting (or after the board fell asleep) only wakes it up
 const ATTEMPTS: usize = 3;
+/// a session that neither polls successfully nor ends for this long is abandoned together with its adapter;
+/// longer than the worst-case scan + connect + first poll, and it also fires right after the Mac wakes from sleep
+const STALL: Duration = Duration::from_secs(120);
+/// consecutive sessions without a single successful poll before the adapter is recreated
+const FRESH_ADAPTER_AFTER: u32 = 5;
 
 type Notifications = Pin<Box<dyn Stream<Item = ValueNotification> + Send>>;
 
@@ -57,22 +63,67 @@ pub async fn run(app: AppHandle, shared: Shared, history: SharedHistory) {
         Ok(m) => m,
         Err(e) => return publish(&app, &shared, |s| fail(s, format!("Bluetooth unavailable: {e}"))),
     };
+    // every `adapters()` call spawns a CoreBluetooth thread that never exits, so keep one adapter
+    // and replace it only when it looks wedged (e.g. after system sleep)
+    let mut adapter: Option<Adapter> = None;
+    let mut failures = 0;
     loop {
-        if let Err(e) = session(&app, &shared, &history, &manager).await {
+        let a = match &adapter {
+            Some(a) => a,
+            None => match open_adapter(&manager).await {
+                Ok(a) => adapter.insert(a),
+                Err(e) => {
+                    eprintln!("[bms] {e}");
+                    publish(&app, &shared, |s| fail(s, e));
+                    sleep(Duration::from_secs(3)).await;
+                    continue;
+                }
+            },
+        };
+        let started = now_ms();
+        let progress = AtomicU64::new(started);
+        let result = tokio::select! {
+            r = session(&app, &shared, &history, a, &progress) => r,
+            _ = stalled(&progress) => Err(format!("no progress for {} s", STALL.as_secs())),
+        };
+        let stall = matches!(&result, Err(e) if e.starts_with("no progress"));
+        if let Err(e) = result {
             eprintln!("[bms] session ended: {e}");
             publish(&app, &shared, |s| fail(s, e));
         }
+        failures = if progress.load(Ordering::Relaxed) > started { 0 } else { failures + 1 };
+        if stall || failures >= FRESH_ADAPTER_AFTER {
+            eprintln!("[bms] recreating Bluetooth adapter");
+            adapter = None;
+            failures = 0;
+        }
         sleep(Duration::from_secs(3)).await;
+    }
+}
+
+async fn open_adapter(manager: &Manager) -> Result<Adapter, String> {
+    // Adapter::new waits for CoreBluetooth's first state update, which may never come right after wake
+    guard("open adapter", Duration::from_secs(10), manager.adapters())
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no Bluetooth adapter".to_string())
+}
+
+/// Resolves once `progress` (unix ms of the last successful poll) is older than STALL.
+/// Wall-clock time, so a Mac that slept through a session trips it right after waking.
+async fn stalled(progress: &AtomicU64) {
+    loop {
+        sleep(Duration::from_secs(5)).await;
+        if now_ms().saturating_sub(progress.load(Ordering::Relaxed)) > STALL.as_millis() as u64 {
+            return;
+        }
     }
 }
 
 fn fail(s: &mut Snapshot, e: String) {
     s.status = "error".into();
     s.error = Some(e);
-}
-
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
 }
 
 /// CoreBluetooth calls can hang forever after a silent disconnect; bound every one of them.
@@ -86,10 +137,10 @@ async fn guard<T, E: std::fmt::Display>(what: &str, limit: Duration, f: impl std
 const OP: Duration = Duration::from_secs(5);
 
 async fn find_bms(adapter: &Adapter) -> Result<Peripheral, String> {
-    adapter.start_scan(ScanFilter { services: vec![SERVICE] }).await.map_err(err)?;
+    guard("start scan", OP, adapter.start_scan(ScanFilter { services: vec![SERVICE] })).await?;
     let deadline = Instant::now() + Duration::from_secs(20);
     let found = 'scan: loop {
-        for p in adapter.peripherals().await.map_err(err)? {
+        for p in guard("peripherals", OP, adapter.peripherals()).await? {
             if matches!(guard("properties", OP, p.properties()).await, Ok(Some(ref props)) if props.services.contains(&SERVICE)) {
                 break 'scan Ok(p);
             }
@@ -99,33 +150,25 @@ async fn find_bms(adapter: &Adapter) -> Result<Peripheral, String> {
         }
         sleep(Duration::from_millis(500)).await;
     };
-    let _ = adapter.stop_scan().await;
+    let _ = guard("stop scan", OP, adapter.stop_scan()).await;
     found
 }
 
-async fn session(app: &AppHandle, shared: &Shared, history: &SharedHistory, manager: &Manager) -> Result<(), String> {
-    let adapter = manager
-        .adapters()
-        .await
-        .map_err(err)?
-        .into_iter()
-        .next()
-        .ok_or("no Bluetooth adapter")?;
-
+async fn session(app: &AppHandle, shared: &Shared, history: &SharedHistory, adapter: &Adapter, progress: &AtomicU64) -> Result<(), String> {
     publish(app, shared, |s| s.status = "scanning".into());
-    let p = find_bms(&adapter).await?;
+    let p = find_bms(adapter).await?;
     let name = guard("properties", OP, p.properties()).await.ok().flatten().and_then(|pr| pr.local_name);
 
     publish(app, shared, |s| {
         s.status = "connecting".into();
         s.device = name.clone();
     });
-    let result = poll(app, shared, history, &p).await;
+    let result = poll(app, shared, history, &p, progress).await;
     let _ = guard("disconnect", OP, p.disconnect()).await;
     result
 }
 
-async fn poll(app: &AppHandle, shared: &Shared, history: &SharedHistory, p: &Peripheral) -> Result<(), String> {
+async fn poll(app: &AppHandle, shared: &Shared, history: &SharedHistory, p: &Peripheral, progress: &AtomicU64) -> Result<(), String> {
     guard("connect", Duration::from_secs(15), p.connect()).await?;
     guard("discover services", Duration::from_secs(10), p.discover_services()).await?;
     let chars = p.characteristics();
@@ -165,6 +208,7 @@ async fn poll(app: &AppHandle, shared: &Shared, history: &SharedHistory, p: &Per
             s.cells = cells;
             s.updated_at = now_ms();
         });
+        progress.store(now_ms(), Ordering::Relaxed);
         sleep(POLL).await;
         if !guard("is_connected", OP, p.is_connected()).await.unwrap_or(false) {
             return Err("connection lost".into());
