@@ -157,13 +157,17 @@ async fn find_bms(adapter: &Adapter) -> Result<Peripheral, String> {
 async fn session(app: &AppHandle, shared: &Shared, history: &SharedHistory, adapter: &Adapter, progress: &AtomicU64) -> Result<(), String> {
     publish(app, shared, |s| s.status = "scanning".into());
     let p = find_bms(adapter).await?;
-    let name = guard("properties", OP, p.properties()).await.ok().flatten().and_then(|pr| pr.local_name);
+    let props = guard("properties", OP, p.properties()).await.ok().flatten();
+    let name = props.as_ref().and_then(|pr| pr.local_name.clone());
+    eprintln!("[bms] found {} rssi {:?}", name.as_deref().unwrap_or("?"), props.and_then(|pr| pr.rssi));
 
     publish(app, shared, |s| {
         s.status = "connecting".into();
         s.device = name.clone();
     });
+    let started = Instant::now();
     let result = poll(app, shared, history, &p, progress).await;
+    eprintln!("[bms] session lasted {} s", started.elapsed().as_secs());
     let _ = guard("disconnect", OP, p.disconnect()).await;
     result
 }
@@ -174,6 +178,7 @@ async fn poll(app: &AppHandle, shared: &Shared, history: &SharedHistory, p: &Per
     let chars = p.characteristics();
     let find = |u: Uuid| chars.iter().find(|c| c.uuid == u).cloned().ok_or(format!("characteristic {u} missing"));
     let (rx, tx) = (find(RX)?, find(TX)?);
+    eprintln!("[bms] tx properties {:?}", tx.properties);
     guard("subscribe", OP, p.subscribe(&rx)).await?;
     let mut link = Link { p, tx, notes: guard("notifications", OP, p.notifications()).await?, asm: FrameAssembler::default() };
 
